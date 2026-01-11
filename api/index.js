@@ -1,7 +1,4 @@
-// api/index.js
-
 export default async function handler(req, res) {
-  // 1. Get URL from query parameter
   const { url } = req.query;
 
   if (!url || !url.includes('youtube.com/shorts')) {
@@ -9,81 +6,81 @@ export default async function handler(req, res) {
   }
 
   try {
-    // 2. Fetch the HTML content using a User-Agent to ensure we get the Desktop/Mobile web version
+    // 1. Fetch with Headers to bypass "Consent" screen and simulate a real browser
     const response = await fetch(url, {
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept-Language': 'en-US,en;q=0.9',
+        // This cookie is CRITICAL for server-side fetching to bypass the Google Consent Page
+        'Cookie': 'CONSENT=YES+cb.20210328-17-p0.en+FX+417; SOCS=CAESEwgDEgk0ODE3Nzk3MjQaAmVuIAEaBgiAo_CmBg;', 
       }
     });
 
     const html = await response.text();
 
-    // 3. Extract the 'ytInitialReelWatchSequenceResponse' variable using Regex
-    // The HTML provided shows: var ytInitialReelWatchSequenceResponse = '...';
+    // Debug: Check if we got the consent page instead of the video
+    if (html.includes('consent.youtube.com')) {
+      return res.status(403).json({ error: 'YouTube blocked the request with a Consent Page. Vercel IP is restricted.' });
+    }
+
+    // 2. Regex to find the Sequence Variable
+    // Matches: var ytInitialReelWatchSequenceResponse = '...';
     const regex = /var ytInitialReelWatchSequenceResponse\s*=\s*'([^']+)';/;
     const match = html.match(regex);
 
     if (!match || !match[1]) {
-      return res.status(500).json({ error: 'Could not find Shorts sequence data in HTML' });
+      return res.status(200).json({ 
+        count: 0, 
+        message: 'Sequence variable not found. YouTube might have treated this request as a bot.',
+        debug: 'Try running this locally to see if it works. Vercel IPs are often flagged.'
+      });
     }
 
-    // 4. Decode the raw string
-    // YouTube obfuscates the JSON string using Hex escapes (e.g., \x7b for { and \x22 for ")
+    // 3. Decode the Hex-Escaped String (e.g. \x7b -> {)
     const rawString = match[1];
-    
-    // We unescape the hex values to get valid JSON string
     const jsonString = rawString.replace(/\\x([0-9A-Fa-f]{2})/g, (_, hex) => {
       return String.fromCharCode(parseInt(hex, 16));
     });
 
-    // 5. Parse JSON
-    // Note: The string might contain escaped backslashes for the JSON string content, 
-    // basic JSON.parse might fail if double encoded, but usually works on the hex-decoded string.
+    // 4. Parse the JSON
     let parsedData;
     try {
-        parsedData = JSON.parse(jsonString);
+      parsedData = JSON.parse(jsonString);
     } catch (e) {
-        // Fallback: sometimes purely unwrapping hex isn't enough depending on nested quotes
-        // This cleaning step helps fix common JSON string issues in scraped data
-        const cleanedJson = jsonString.replace(/\\"/g, '"').replace(/\\\\/g, '\\');
-        parsedData = JSON.parse(cleanedJson);
+      return res.status(500).json({ error: 'JSON Parse Error', details: e.message });
     }
 
-    // 6. Extract relevant Video Data
-    // The structure is typically: entries -> [ { command, reelWatchEndpoint, ... } ]
+    // 5. Extract Entries
     const entries = parsedData.entries || [];
-
+    
+    // Map the data
     const nextVideos = entries.map(entry => {
       const endpoint = entry.reelWatchEndpoint;
-      const prefetch = entry.unserializedPrefetchData?.playerResponse?.videoDetails;
-
       if (!endpoint) return null;
 
-      // Extract high-quality thumbnail if available
+      // The prefetch data usually contains the title/channel info
+      // Check both 'unserializedPrefetchData' and standard 'overlay' locations
+      const videoDetails = entry.unserializedPrefetchData?.playerResponse?.videoDetails;
+
       const thumbnails = endpoint.thumbnail?.thumbnails || [];
       const bestThumbnail = thumbnails.length > 0 ? thumbnails[thumbnails.length - 1].url : null;
 
       return {
         videoId: endpoint.videoId,
         url: `https://www.youtube.com/shorts/${endpoint.videoId}`,
-        title: prefetch?.title || 'Unknown Title',
-        author: prefetch?.author || 'Unknown Author',
-        viewCount: prefetch?.viewCount || '0',
-        thumbnail: bestThumbnail,
-        // The sequence param is needed if you want to paginate further via API
-        sequenceParams: endpoint.sequenceParams 
+        title: videoDetails?.title || 'Unknown Title',
+        author: videoDetails?.author || 'Unknown Channel',
+        viewCount: videoDetails?.viewCount || '0',
+        thumbnail: bestThumbnail
       };
-    }).filter(item => item !== null); // Remove empty entries
+    }).filter(item => item !== null);
 
-    // 7. Return JSON response
     return res.status(200).json({
       count: nextVideos.length,
-      currentVideoId: parsedData.replacementEndpoint?.reelWatchEndpoint?.videoId || 'unknown',
       nextVideos: nextVideos
     });
 
   } catch (error) {
-    console.error(error);
-    return res.status(500).json({ error: 'Failed to scrape data', details: error.message });
+    return res.status(500).json({ error: 'Server Error', details: error.message });
   }
 }
