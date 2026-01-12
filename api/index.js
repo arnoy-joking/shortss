@@ -5,92 +5,49 @@ export default async function handler(req, res) {
     return res.status(400).json({ error: 'Please provide a valid YouTube Shorts URL' });
   }
 
+  // 1. Extract the current video ID from the URL so we can remove it from results
+  // Example: https://www.youtube.com/shorts/sP2N53Se2qY -> sP2N53Se2qY
+  const currentIdMatch = url.match(/shorts\/([a-zA-Z0-9_-]{11})/);
+  const currentId = currentIdMatch ? currentIdMatch[1] : null;
+
   try {
-    // --- STEP 1: Fetch the HTML Skeleton ---
+    // 2. Fetch the HTML
     const response = await fetch(url, {
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'Accept-Language': 'en-US,en;q=0.9',
       }
     });
+
     const html = await response.text();
 
-    // --- STEP 2: Extract Credentials & Sequence Params ---
-    
-    // A. Get API Key
-    const apiKeyMatch = html.match(/"INNERTUBE_API_KEY":"([^"]+)"/);
-    const apiKey = apiKeyMatch ? apiKeyMatch[1] : null;
+    // 3. The Regex Pattern
+    // Looks for "shorts/" OR "shorts\/" followed by exactly 11 characters (the ID)
+    const regex = /shorts(?:\\\/|\/)([a-zA-Z0-9_-]{11})/g;
 
-    // B. Get Client Version (e.g., 2.2024...)
-    const clientVerMatch = html.match(/"INNERTUBE_CLIENT_VERSION":"([^"]+)"/);
-    const clientVer = clientVerMatch ? clientVerMatch[1] : '2.20230622.06.00'; // Fallback
+    // 4. Use a Set to store IDs. Sets automatically enforce uniqueness (No Duplicates)
+    const uniqueIds = new Set();
+    let match;
 
-    // C. Get Sequence Params (The key to the next videos)
-    // In your HTML source, this is inside window['ytCommand'] -> sequenceParams
-    const seqParamsMatch = html.match(/"sequenceParams":"([^"]+)"/);
-    const sequenceParams = seqParamsMatch ? seqParamsMatch[1] : null;
-
-    if (!apiKey || !sequenceParams) {
-      return res.status(500).json({ 
-        error: 'Could not extract API keys or Sequence Params. YouTube might have changed the layout.',
-        debug_keys: { apiKey: !!apiKey, sequenceParams: !!sequenceParams }
-      });
+    while ((match = regex.exec(html)) !== null) {
+      const foundId = match[1];
+      
+      // Only add if it's NOT the current video ID
+      if (foundId !== currentId) {
+        uniqueIds.add(foundId);
+      }
     }
 
-    // --- STEP 3: Call YouTube Internal API (RPC) ---
-    // We simulate the call the browser would have made to fetch the next videos
-    
-    const apiUrl = `https://www.youtube.com/youtubei/v1/reel/reel_watch_sequence?key=${apiKey}`;
-    const apiBody = {
-      context: {
-        client: {
-          clientName: "WEB",
-          clientVersion: clientVer,
-          hl: "en",
-          gl: "US",
-        }
-      },
-      params: sequenceParams
-    };
-
-    const apiResponse = await fetch(apiUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(apiBody)
-    });
-
-    const apiData = await apiResponse.json();
-
-    // --- STEP 4: Parse the API Response ---
-
-    const entries = apiData.entries || [];
-    
-    const nextVideos = entries.map(entry => {
-      const endpoint = entry.reelWatchEndpoint;
-      if (!endpoint) return null;
-
-      // Sometimes data is in overlay, sometimes in command metadata
-      const overlay = entry.overlay?.reelPlayerOverlayRenderer;
-      const header = overlay?.reelPlayerHeaderSupportedRenderers?.reelPlayerHeaderRenderer;
-      
-      // Try to find title in accessibility label (common in API responses)
-      // e.g. "Video Title by Channel Name 1 day ago"
-      const label = header?.accessibility?.accessibilityData?.label || "Unknown";
-
-      // Thumbnails
-      const thumbs = endpoint.thumbnail?.thumbnails || [];
-      const thumbUrl = thumbs.length > 0 ? thumbs[thumbs.length - 1].url : null;
-
-      return {
-        id: endpoint.videoId,
-        url: `https://www.youtube.com/shorts/${endpoint.videoId}`,
-        description_snippet: label,
-        thumbnail: thumbUrl
-      };
-    }).filter(v => v !== null);
+    // 5. Convert the Set back to an Array and format the objects
+    const nextVideos = Array.from(uniqueIds).map(id => ({
+      videoId: id,
+      url: `https://www.youtube.com/shorts/${id}`,
+      thumbnail: `https://i.ytimg.com/vi/${id}/hqdefault.jpg`
+    }));
 
     return res.status(200).json({
       count: nextVideos.length,
+      currentVideoId: currentId,
       nextVideos: nextVideos
     });
 
