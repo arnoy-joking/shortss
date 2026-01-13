@@ -1,20 +1,32 @@
 export default async function handler(req, res) {
-  // 1. Get URL and optional Cookies from query parameters
+  // --- CORS HEADERS (The Fix) ---
+  res.setHeader('Access-Control-Allow-Credentials', true);
+  res.setHeader('Access-Control-Allow-Origin', '*'); // Allow ALL domains
+  res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS,PATCH,DELETE,POST,PUT');
+  res.setHeader(
+    'Access-Control-Allow-Headers',
+    'X-CSRF-Token, X-Requested-With, Accept, Accept-Version, Content-Length, Content-MD5, Content-Type, Date, X-Api-Version'
+  );
+
+  // Handle "OPTIONS" preflight request immediately
+  if (req.method === 'OPTIONS') {
+    res.status(200).end();
+    return;
+  }
+  // -----------------------------
+
   const { url, cookies } = req.query;
 
   if (!url || !url.includes('youtube.com/shorts')) {
     return res.status(400).json({ error: 'Please provide a valid YouTube Shorts URL' });
   }
 
-  // Extract current ID to filter it out later
+  // Extract current ID
   const currentIdMatch = url.match(/shorts\/([a-zA-Z0-9_-]{11})/);
   const currentId = currentIdMatch ? currentIdMatch[1] : null;
 
-  // 2. Prepare Cookies
-  // Default cookie ensures we bypass the "Before you continue" Google consent page
+  // Prepare Cookies
   const defaultCookie = 'CONSENT=YES+cb.20210328-17-p0.en+FX+417; SOCS=CAESEwgDEgk0ODE3Nzk3MjQaAmVuIAEaBgiAo_CmBg;';
-  
-  // Use user provided cookies if available, otherwise use default
   const headersCookies = cookies || defaultCookie;
 
   try {
@@ -22,17 +34,13 @@ export default async function handler(req, res) {
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'Accept-Language': 'en-US,en;q=0.9',
-        // Inject the cookies here
         'Cookie': headersCookies
       }
     });
 
     const html = await response.text();
 
-    // 3. THE PATTERN
-    // shorts(?:\\\/|\/)  -> Matches "shorts/" or "shorts\/"
-    // ([a-zA-Z0-9_-]{11}) -> Captures exactly 11 chars (The ID)
-    // (?=["\\])           -> Lookahead: Ensures it ends with a quote or backslash (\x22)
+    // REGEX PATTERN: Look for shorts/ID followed by " or \
     const regex = /shorts(?:\\\/|\/)([a-zA-Z0-9_-]{11})(?=["\\])/g;
 
     const uniqueIds = new Set();
